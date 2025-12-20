@@ -10,7 +10,11 @@
         button:hover { background-color: #0056b3; }
         .response { margin-top: 20px; padding: 10px; background-color: #f0f0f0; border-radius: 4px; }
         #audio-controls { margin-top: 20px; padding: 20px; border: 1px solid #eee; border-radius: 8px; text-align: center; }
-        #visualizer { width: 100%; height: 100px; background-color: #222; margin-top: 10px; border-radius: 4px; }
+        canvas { width: 100%; background-color: #222; margin-top: 10px; border-radius: 4px; display: block; }
+        canvas { width: 100%; background-color: #222; margin-top: 10px; border-radius: 4px; display: block; }
+        #waveform { height: 100px; }
+        #freq-spectrum { height: 100px; }
+        #spectrogram { height: 200px; }
         .active { background-color: #dc3545; }
         .active:hover { background-color: #c82333; }
     </style>
@@ -22,7 +26,10 @@
         <div id="audio-controls">
             <h3>Audio Stream</h3>
             <button id="audio-toggle">Start Streaming</button>
-            <canvas id="visualizer"></canvas>
+            <button id="audio-toggle">Start Streaming</button>
+            <canvas id="waveform"></canvas>
+            <canvas id="freq-spectrum"></canvas>
+            <canvas id="spectrogram"></canvas>
         </div>
 
         <form action="/send" method="post" style="margin-top: 20px;">
@@ -37,10 +44,16 @@
     </div>
 </body>
     </div>
+    </div>
     <script>
         const audioToggleBtn = document.getElementById('audio-toggle');
-        const canvas = document.getElementById('visualizer');
-        const canvasCtx = canvas.getContext('2d');
+        const waveCanvas = document.getElementById('waveform');
+        const freqCanvas = document.getElementById('freq-spectrum');
+        const specCanvas = document.getElementById('spectrogram');
+        
+        const waveCtx = waveCanvas.getContext('2d');
+        const freqCtx = freqCanvas.getContext('2d');
+        const specCtx = specCanvas.getContext('2d', { willReadFrequently: true });
         
         let audioContext;
         let analyser;
@@ -48,12 +61,45 @@
         let animationId;
         let isStreaming = false;
 
+        let dpr = window.devicePixelRatio || 1;
+
         function resizeCanvas() {
-            canvas.width = canvas.offsetWidth;
-            canvas.height = canvas.offsetHeight;
+            dpr = window.devicePixelRatio || 1;
+            
+            // Helper to set canvas size correctly for High DPI
+            function setSize(canvas) {
+                const rect = canvas.getBoundingClientRect();
+                canvas.width = rect.width * dpr;
+                canvas.height = rect.height * dpr;
+            }
+
+            setSize(waveCanvas);
+            setSize(freqCanvas);
+            setSize(specCanvas);
         }
-        window.addEventListener('resize', resizeCanvas);
-        resizeCanvas();
+        function getFreqData(freq, sampleRate, dataArray) {
+            // Revert to Linear Interpolation (Real Data representation)
+            const nyquist = sampleRate / 2;
+            const index = freq * (dataArray.length) / nyquist;
+            const i1 = Math.floor(index);
+            const i2 = i1 + 1;
+            
+            if (i1 >= dataArray.length) return 0;
+            
+            const v1 = dataArray[i1];
+            const v2 = (i2 < dataArray.length) ? dataArray[i2] : v1;
+            
+            const t = index - i1;
+            return v1 * (1 - t) + v2 * t;
+        }
+
+        function getColor(value) {
+            const p = value / 255;
+            if (p < 0.1) return `rgb(0,0,${Math.floor(p*10*255)})`;
+            if (p < 0.3) return `rgb(0,${Math.floor((p-0.1)*5*255)},255)`;
+            if (p < 0.6) return `rgb(0,255,${Math.floor((0.6-p)*3.33*255)})`;
+            return `rgb(255,${Math.floor((1-p)*2.5*255)},0)`;
+        }
 
         function drawVisualizer() {
             if (!isStreaming) return;
@@ -61,46 +107,120 @@
             animationId = requestAnimationFrame(drawVisualizer);
 
             const bufferLength = analyser.frequencyBinCount;
-            const dataArray = new Uint8Array(bufferLength);
-            analyser.getByteTimeDomainData(dataArray);
+            // ByteFrequencyData for Spectrum and Spectrogram
+            const freqData = new Uint8Array(bufferLength);
+            analyser.getByteFrequencyData(freqData);
+            
+            // TimeDomainData for Waveform
+            const timeData = new Uint8Array(bufferLength);
+            analyser.getByteTimeDomainData(timeData);
 
-            canvasCtx.fillStyle = '#222';
-            canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
-
-            canvasCtx.lineWidth = 2;
-            canvasCtx.strokeStyle = '#00ff00';
-            canvasCtx.beginPath();
-
-            const sliceWidth = canvas.width * 1.0 / bufferLength;
+            // --- Draw Waveform (Oscilloscope) ---
+            waveCtx.fillStyle = '#222';
+            waveCtx.fillRect(0, 0, waveCanvas.width, waveCanvas.height);
+            waveCtx.lineWidth = 2 * dpr;
+            waveCtx.strokeStyle = '#00ff00'; // Green
+            waveCtx.beginPath();
+            
+            const sliceWidth = waveCanvas.width * 1.0 / bufferLength;
             let x = 0;
-
             for (let i = 0; i < bufferLength; i++) {
-                const v = dataArray[i] / 128.0;
-                const y = v * canvas.height / 2;
-
-                if (i === 0) {
-                    canvasCtx.moveTo(x, y);
-                } else {
-                    canvasCtx.lineTo(x, y);
-                }
-
+                const v = timeData[i] / 128.0;
+                const y = v * waveCanvas.height / 2;
+                if (i === 0) waveCtx.moveTo(x, y);
+                else waveCtx.lineTo(x, y);
                 x += sliceWidth;
             }
+            waveCtx.lineTo(waveCanvas.width, waveCanvas.height/2);
+            waveCtx.stroke();
 
-            canvasCtx.lineTo(canvas.width, canvas.height / 2);
-            canvasCtx.stroke();
+            // --- Draw Frequency Spectrum (Bar Graph) ---
+            freqCtx.fillStyle = '#222';
+            freqCtx.fillRect(0, 0, freqCanvas.width, freqCanvas.height);
+
+            // --- Draw Frequency Spectrum (Bar Graph - Log Bands) ---
+            freqCtx.fillStyle = '#222';
+            freqCtx.fillRect(0, 0, freqCanvas.width, freqCanvas.height);
+
+            const minFreq = 20;
+            const maxFreq = 20000;
+            const sampleRate = audioContext.sampleRate;
+            const logMin = Math.log10(minFreq);
+            const logMax = Math.log10(maxFreq);
+            const logRange = logMax - logMin;
+
+            // Draw uniform bars
+            // We'll calculate the value for each pixel column
+            for (let x = 0; x < freqCanvas.width; x++) {
+                // Determine the frequency represented by this x position
+                // x / width = (log(f) - log(min)) / (log(max) - log(min))
+                // log(f) = log(min) + (x/width) * logRange
+                const logFreq = logMin + (x / freqCanvas.width) * logRange;
+                const freq = Math.pow(10, logFreq);
+                
+                // Get interpolated value
+                const value = getFreqData(freq, sampleRate, freqData);
+
+                const barHeight = (value / 255) * freqCanvas.height;
+                
+                // Color based on x position (frequency)
+                freqCtx.fillStyle = `hsl(${x / freqCanvas.width * 300}, 100%, 50%)`;
+                
+                // Draw 1px wide bar
+                freqCtx.fillRect(x, freqCanvas.height - barHeight, 1, barHeight);
+            }
+
+            // Draw Frequency Labels
+            freqCtx.fillStyle = '#fff';
+            // Scale font size by dpr
+            const fontSize = 12 * dpr;
+            freqCtx.font = `bold ${fontSize}px sans-serif`;
+            freqCtx.textAlign = 'left';
+            freqCtx.fillText('20Hz', 4 * dpr, freqCanvas.height - 4 * dpr);
+            freqCtx.textAlign = 'center';
+            const x1k = (Math.log10(1000) - logMin) / logRange * freqCanvas.width;
+            freqCtx.fillText('1kHz', x1k, freqCanvas.height - 4 * dpr);
+            freqCtx.textAlign = 'right';
+            freqCtx.fillText('20kHz', freqCanvas.width - 4 * dpr, freqCanvas.height - 4 * dpr);
+
+            // --- Draw Spectrogram (Waterfall) ---
+            // Draw previous image stretched to new size (shifted down by 1 pixel equivalent)
+            // Note: Since we are drawing pixel-by-pixel, we can just use drawImage with correct coords
+            specCtx.drawImage(specCanvas, 
+                0, 0, specCanvas.width, specCanvas.height - 1 * dpr,
+                0, 1 * dpr, specCanvas.width, specCanvas.height - 1 * dpr
+            );
+            
+            // Draw new row with interpolation
+             for (let x = 0; x < specCanvas.width; x++) {
+                const logFreq = logMin + (x / specCanvas.width) * logRange;
+                const freq = Math.pow(10, logFreq);
+                const value = getFreqData(freq, sampleRate, freqData);
+                
+                specCtx.fillStyle = getColor(value);
+                // Draw height of dpr to match 1 CSS pixel vertical movement
+                specCtx.fillRect(x, 0, 1, 1 * dpr);
+            }
         }
 
         async function startStream() {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: true,
+                        autoGainControl: false
+                    } 
+                });
                 
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 analyser = audioContext.createAnalyser();
                 microphone = audioContext.createMediaStreamSource(stream);
                 
                 microphone.connect(analyser);
-                analyser.fftSize = 2048;
+                analyser.fftSize = 16384; // Max resolution for best bass accuracy
+                analyser.frequencyBinCount = 16384;
+                analyser.smoothingTimeConstant = 0; // No time smoothing, exact tracking
 
                 isStreaming = true;
                 audioToggleBtn.textContent = 'Stop Streaming';
@@ -108,7 +228,6 @@
                 
                 drawVisualizer();
 
-                // Store stream on the button element to access it later for stopping
                 audioToggleBtn.stream = stream;
 
             } catch (err) {
@@ -131,10 +250,6 @@
             if (animationId) {
                 cancelAnimationFrame(animationId);
             }
-
-            // Clear canvas
-            canvasCtx.fillStyle = '#222';
-            canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
 
             isStreaming = false;
             audioToggleBtn.textContent = 'Start Streaming';
