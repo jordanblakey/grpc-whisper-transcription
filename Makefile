@@ -36,3 +36,8 @@ logs: ## Tail logs for all containers
 
 down: ## Stop and remove containers, networks, volumes, and images
 	docker compose down
+
+install-whisper-system-deps: ## Install system dependencies for Whisper
+	sudo apt install nvidia-cuda-toolkit
+	sudo apt install nvidia-cudnn
+	sudo apt install nvidia-cublas
