@@ -10,11 +10,10 @@ services:
         - action: sync+restart
           path: ./server
           target: /app/server
-        - action: sync+restart
-          path: ./protos
-          target: /app/protos
         - action: rebuild
-          path: ./requirements.txt
+          path: ./protos
+        - action: rebuild
+          path: ./server/requirements.txt
 
   client:
     build:
@@ -31,8 +30,7 @@ services:
         - action: sync+restart
           path: ./client
           target: /app/client
-        - action: sync+restart
-          path: ./protos
-          target: /app/protos
         - action: rebuild
-          path: ./requirements.txt
+          path: ./protos
+        - action: rebuild
+          path: ./client/requirements.txt
