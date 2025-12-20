@@ -33,7 +33,7 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
         
         # Stream timing
         samples_per_second = 16000
-        transcribe_interval_samples = 16000  # Strict 1.0s cooldown
+        transcribe_interval_samples = 4000  # Strict 0.25s cooldown
         max_utterance_samples = 30 * samples_per_second
         
         # Transcription state
@@ -106,11 +106,18 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
                         current_duration = samples_in_utterance / samples_per_second
                         silence_duration = current_duration - latest_speech_end
                         
+                        # Check if VAD removed all audio (common for very short utterances)
+                        vad_removed_all = (len(segments_list) == 0 or latest_speech_end == 0.0)
+                        
                         # Finalization triggers:
-                        # 1. Long silence (1.5s)
+                        # 1. Silence threshold (0.6s) - aggressive for sentence-by-sentence reading
                         # 2. Max utterance length reached (30s)
-                        should_finalize = (silence_duration >= 1.5) or \
-                                         (samples_in_utterance >= max_utterance_samples)
+                        # 3. Short utterance special case: silence >= 0.5s and longer than the speech
+                        # 4. If VAD removed all audio and we've been waiting for 1.5+ seconds (stuck partial)
+                        should_finalize = (silence_duration >= 0.6) or \
+                                         (samples_in_utterance >= max_utterance_samples) or \
+                                         (speech_text and silence_duration >= 0.5 and silence_duration > latest_speech_end) or \
+                                         (vad_removed_all and current_duration >= 1.5)
                         
                         if should_finalize:
                             if speech_text:

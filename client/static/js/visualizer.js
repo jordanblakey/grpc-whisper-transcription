@@ -1,4 +1,5 @@
 const audioToggleBtn = document.getElementById('audio-toggle');
+const visualizerToggleBtn = document.getElementById('visualizer-toggle');
 const waveCanvas = document.getElementById('waveform');
 const freqCanvas = document.getElementById('freq-spectrum');
 const specCanvas = document.getElementById('spectrogram');
@@ -18,6 +19,7 @@ let analyser;
 let microphone;
 let animationId;
 let isStreaming = false;
+let isVisualizerOnly = false;
 let socket;
 const transcriptionDiv = document.getElementById('transcription');
 
@@ -96,20 +98,29 @@ function renderWaveformFrame(waveCtx, timeData, bufferLength) {
     waveCtx.strokeStyle = '#00ff00'; 
     waveCtx.beginPath();
 
-    // --- Oscilloscope Triggering (DC-Offset Aware) ---
-    // Calculate mean of the ENTIRE buffer for maximum stability
-    let sum = 0;
-    for (let i = 0; i < bufferLength; i++) sum += timeData[i];
-    const mean = sum / bufferLength;
-
-    const plotLength = 1000; 
+    const plotLength = 1000;
     let offset = 0;
+    let mean = 0;
+
+    // --- Optimized Oscilloscope Triggering ---
+    // Search backwards from the END of the buffer for lower latency
+    // Only search the last ~1600 samples (100ms at 16kHz) for the trigger
+    const maxSearchWindow = 1600; // ~100ms search window
+    const searchStart = Math.max(0, bufferLength - plotLength - maxSearchWindow);
+    const searchEnd = bufferLength - plotLength;
     
-    for (let i = 0; i < bufferLength - plotLength; i++) {
-        // Find transition across the mean
+    // Calculate mean only from the recent window for faster computation
+    let sum = 0;
+    for (let i = searchStart; i < bufferLength; i++) sum += timeData[i];
+    mean = sum / (bufferLength - searchStart);
+    
+    // Search backwards from most recent data
+    offset = searchEnd; // Default to end if no trigger found
+    for (let i = searchEnd; i >= searchStart; i--) {
+        // Find transition across the mean (rising edge)
         if (timeData[i] < mean && timeData[i+1] >= mean) {
             offset = i;
-            break;
+            break; // Take the FIRST (most recent) trigger we find
         }
     }
     
@@ -136,6 +147,7 @@ function renderWaveformFrame(waveCtx, timeData, bufferLength) {
         
         if (idx === offset) waveCtx.moveTo(x, y);
         else waveCtx.lineTo(x, y);
+        
         x += sliceWidth;
     }
     waveCtx.stroke();
@@ -197,7 +209,7 @@ function renderSpectrogramFrame(specCtx,freqData,logMin,logMax,logRange,sampleRa
 }
 
 function drawVisualizer() {
-    if (!isStreaming) return;
+    if (!isStreaming && !isVisualizerOnly) return;
 
     animationId = requestAnimationFrame(drawVisualizer);
 
@@ -381,8 +393,94 @@ function stopStream() {
 
 audioToggleBtn.addEventListener('click', () => {
     if (!isStreaming) {
+        // Stop visualizer-only mode if active
+        if (isVisualizerOnly) {
+            stopVisualizerOnly();
+        }
         startStream();
     } else {
         stopStream();
+    }
+});
+
+async function startVisualizerOnly() {
+    try {
+        console.log('Starting visualizer-only mode...');
+        
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            audio: {
+                noiseSuppression: false,
+                echoCancellation: false,
+                autoGainControl: false
+            } 
+        });
+        
+        console.log('Microphone access granted');
+        
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioContext.createAnalyser();
+        microphone = audioContext.createMediaStreamSource(stream);
+        
+        microphone.connect(analyser);
+        analyser.fftSize = 16384; 
+        analyser.smoothingTimeConstant = 0;
+
+        // No WebSocket connection - just visualizer
+        const bufferLength = analyser.frequencyBinCount;
+        freqData = new Uint8Array(bufferLength);
+        timeDataFloat = new Float32Array(analyser.fftSize);
+
+        isVisualizerOnly = true;
+        visualizerToggleBtn.textContent = 'Stop Visualizer';
+        visualizerToggleBtn.classList.add('active');
+        
+        console.log('Starting visualizer animation...');
+        drawVisualizer();
+
+        visualizerToggleBtn.stream = stream;
+        
+        console.log('Visualizer-only mode started successfully');
+
+    } catch (err) {
+        console.error('Error accessing microphone:', err);
+        alert('Error accessing microphone. Please ensure you have granted permission.');
+    }
+}
+
+function stopVisualizerOnly() {
+    console.log('Stopping visualizer-only mode...');
+    
+    if (visualizerToggleBtn.stream) {
+        visualizerToggleBtn.stream.getTracks().forEach(track => track.stop());
+        visualizerToggleBtn.stream = null;
+    }
+    
+    if (audioContext) {
+        audioContext.close();
+        audioContext = null;
+    }
+
+    if (animationId) {
+        cancelAnimationFrame(animationId);
+    }
+
+    isVisualizerOnly = false;
+    visualizerToggleBtn.textContent = 'Visualizer Only';
+    visualizerToggleBtn.classList.remove('active');
+    
+    console.log('Visualizer-only mode stopped');
+}
+
+visualizerToggleBtn.addEventListener('click', () => {
+    console.log('Visualizer button clicked. Current state:', { isVisualizerOnly, isStreaming });
+    
+    if (!isVisualizerOnly) {
+        // Stop streaming mode if active
+        if (isStreaming) {
+            stopStream();
+        }
+        startVisualizerOnly();
+    } else {
+        stopVisualizerOnly();
     }
 });
