@@ -91,7 +91,8 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
 
                     try:
                         # Contextual Prompting: Pass recent history to maintain quality
-                        history_prompt = " ".join(transcription_history)[-300:].strip()
+                        # More history helps with slow narrators
+                        history_prompt = " ".join(transcription_history)[-500:].strip()
                         initial_prompt = f"I am transcribing live speech. Context: {history_prompt}" if history_prompt else "I am transcribing live speech."
 
                         # --- GPU Optimization: Sliding Window ---
@@ -133,18 +134,26 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
                         avg_wpm = (total_words_finalized / (total_speech_seconds / 60)) if total_speech_seconds > 5 else 150
                         
                         # Dynamic Thresholds
-                        if avg_wpm > 180: # Fast
+                        if avg_wpm > 180: # Fast (YouTube style)
                             base_required_silence = 0.6
                             stall_threshold = 1.0 if has_strong_punctuation else 1.4
-                        elif avg_wpm < 130: # Slow
-                            base_required_silence = 1.2
-                            stall_threshold = 1.5 if has_strong_punctuation else 2.0
+                        elif avg_wpm < 85: # Gothic Narrator (Wizard of Oz style)
+                            # Deep patience for dramatic pauses
+                            base_required_silence = 4.0
+                            stall_threshold = 5.0 if has_strong_punctuation else 7.0
+                        elif avg_wpm < 110: # Narrator (Books)
+                            base_required_silence = 2.5
+                            stall_threshold = 3.0 if has_strong_punctuation else 4.0
+                        elif avg_wpm < 140: # Slow
+                            base_required_silence = 1.5
+                            stall_threshold = 2.0 if has_strong_punctuation else 2.8
                         else: # Normal
-                            base_required_silence = 0.9
-                            stall_threshold = 1.2 if has_strong_punctuation else 1.8
+                            base_required_silence = 1.0
+                            stall_threshold = 1.5 if has_strong_punctuation else 2.2
 
                         required_silence = base_required_silence
                         if has_strong_punctuation:
+                            # If someone just said a period, we can be much snappier
                             required_silence = min(required_silence, 0.4 if avg_wpm < 130 else 0.3)
                         
                         if num_words_window > 15 or total_duration > 15.0:
@@ -156,9 +165,9 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
                         current_sentence_words = []
                         all_speech_text_parts = []
                         
-                        # We only split mid-loop on strong punctuation. 
-                        # Ellipsis (...) is included as it signifies a natural break.
+                        # Split hierarchies
                         STRONG_STOP = [".", "?", "!", "..."]
+                        SOFT_STOP = [",", ";", ":", "-"] # Commas allow splitting but with more patience
                         
                         for s_idx, s in enumerate(segments_list):
                             # Filter out low-confidence segments (hallucinations)
@@ -178,7 +187,7 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
                                     logging.info(f"FINAL (Segment): {s_text}")
                                     last_finalized_end_rel = s.end
                                     total_words_finalized += len(s_text.split())
-                                    total_speech_seconds += (s.end - s.start)
+                                    total_speech_seconds += max(0.2, s.end - s.start)
                                     transcription_history.append(s_text)
                                     transcription_history = transcription_history[-5:]
                                 else:
@@ -191,36 +200,57 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
                                 current_sentence_words.append(w_text)
                                 
                                 # --- Contextual Split Protection ---
-                                has_punct = any(w_text.endswith(p) for p in STRONG_STOP)
+                                has_strong = any(w_text.endswith(p) for p in STRONG_STOP)
+                                has_soft = any(w_text.endswith(p) for p in SOFT_STOP)
                                 is_stop = False
                                 
-                                if has_punct:
-                                    # Look Ahead: Is there another word IMMEDIATELY following this one?
-                                    has_next_word_soon = False
-                                    if w_idx < len(s.words) - 1:
-                                        next_w = s.words[w_idx + 1]
-                                        # If next word starts within 400ms, it's likely a continuous thought
-                                        if (next_w.start - w.end) < 0.4:
-                                            has_next_word_soon = True
-                                    
-                                    # Edge Protection: Is this the very last word of the entire result?
+                                # 1. Look Ahead: Is there another word IMMEDIATELY following this one?
+                                # This is the highest priority - don't split if speech is continuous.
+                                has_next_soon = False
+                                if w_idx < len(s.words) - 1:
+                                    next_w = s.words[w_idx + 1]
+                                    if (next_w.start - w.end) < 0.4:
+                                        has_next_soon = True
+                                elif s_idx < len(segments_list) - 1:
+                                    next_s = segments_list[s_idx + 1]
+                                    if (next_s.start - w.end) < 0.4:
+                                        has_next_soon = True
+                                
+                                if not has_next_soon:
+                                    # Edge Protection variables
                                     is_absolute_last = (w_idx == len(s.words) - 1) and (s_idx == len(segments_list) - 1)
                                     silence_at_edge = total_duration - (window_offset + w.end)
                                     
-                                    if has_next_word_soon:
-                                        # Someone is talking fast; don't split mid-phrase
-                                        is_stop = False
-                                    elif is_absolute_last:
-                                        # At the edge, require 0.7s of silence to confirm the thought is over
-                                        # This prevents "rounding" fragments that lead to hallucinations
-                                        is_stop = (silence_at_edge >= 0.7)
-                                    else:
-                                        # Mid-buffer split with a clear gap; safe to break.
-                                        is_stop = True
-                                
+                                    # Conjunction/Continuation check in next segments
+                                    is_followed_by_continuation = False
+                                    if s_idx < len(segments_list) - 1:
+                                        next_text = segments_list[s_idx + 1].text.strip().lower()
+                                        continuations = ["when", "and", "which", "but", "while", "that", "because", "the", "a"]
+                                        if any(next_text.startswith(c) for c in continuations):
+                                            is_followed_by_continuation = True
+                                    
+                                    # Higher word count for narrators to keep paragraphs whole
+                                    min_words = 12 if avg_wpm < 100 else 6
+                                    is_too_short = len(current_sentence_words) < min_words
+                                    
+                                    if has_strong:
+                                        if is_absolute_last:
+                                            # Edge word: require massive silence for narrators
+                                            required = (2.5 if avg_wpm < 100 else 1.5) if is_too_short else 0.8
+                                            is_stop = (silence_at_edge >= required)
+                                        else:
+                                            # Mid-segment: inhibit split if it's followed by a continuation
+                                            # or if it's too short
+                                            is_stop = not (is_too_short or is_followed_by_continuation)
+                                    elif has_soft:
+                                        # Soft split (comma)
+                                        if is_absolute_last:
+                                            is_stop = (silence_at_edge >= 1.5)
+                                        else:
+                                            is_stop = (silence_at_edge >= 1.0)
+
                                 if is_stop:
                                     sentence_text = " ".join(current_sentence_words)
-                                    # Yield with absolute timestamp
                                     yield transcription_pb2.TranscriptionResult(
                                         text=sentence_text,
                                         is_final=True,
@@ -229,14 +259,13 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
                                     logging.info(f"FINAL (Word): [{absolute_start_time + window_offset + w.start:06.2f}s] {sentence_text}")
                                     
                                     total_words_finalized += len(current_sentence_words)
-                                    # Use the actual duration of the finalized text for WPM
                                     duration_finalized = (w.end - (w.start if len(current_sentence_words) == 1 else s.words[0].start))
                                     total_speech_seconds += max(0.1, duration_finalized)
                                     
                                     transcription_history.append(sentence_text)
                                     transcription_history = transcription_history[-5:]
                                     
-                                    # Use a 50ms cushion to prevent clipping the start of the next word
+                                    # Slicing cushion
                                     last_finalized_end_rel = min(total_duration - window_offset, w.end + 0.05)
                                     current_sentence_words = []
 
@@ -262,10 +291,18 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
                                                (total_stall >= stall_threshold and total_silence >= 0.4)
                         
                         if (global_trigger or should_force_fallback) and remaining_text:
-                            # Anti-Hallucination Sink: Don't finalize very short, low-confidence fragments in forced modes
+                            # Anti-Hallucination Sink: Catch common "politeness" hallucinations during pauses
                             words = remaining_text.split()
-                            if len(words) == 1 and len(words[0]) < 4 and not any(words[0].endswith(p) for p in STRONG_STOP):
-                                # It's probably a hallucination or a stutter, carry it over
+                            clean_text = remaining_text.lower().replace(".", "").replace("!", "").replace("?", "").strip()
+                            
+                            # Whisper often hallucinations these during silence gaps
+                            SINK_WORDS = ["please", "thanks", "thank you", "bye", "you", "it", "with", "the"]
+                            is_hallucination = (len(words) == 1 and clean_text in SINK_WORDS)
+                            
+                            is_junk = (len(words) < 3 and (not any(p in remaining_text for p in STRONG_STOP) or total_silence > 1.0)) or is_hallucination
+                            
+                            if is_junk:
+                                # Carry over
                                 pass
                             else:
                                 # Finalize the entire remainder as one block
