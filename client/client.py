@@ -78,6 +78,10 @@ async def websocket_endpoint(websocket: WebSocket):
 async def read_root(request: Request):
     return templates.TemplateResponse("recorder.html", {"request": request})
 
+@app.get("/recorder2", response_class=HTMLResponse)
+async def read_root(request: Request):
+    return templates.TemplateResponse("recorder2.html", {"request": request})
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8080)
