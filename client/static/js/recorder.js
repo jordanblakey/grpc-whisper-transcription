@@ -9,6 +9,7 @@ class Recorder extends HTMLElement {
         this.recordings = [];
         this.recordingStartTime = null;
         this.database = new RecorderDatabase();
+        this.waveform = null;
         console.log(this);
     }
 
@@ -27,6 +28,17 @@ class Recorder extends HTMLElement {
         this.playButton.addEventListener('click', () => this.play());
         this.deleteButton.addEventListener('click', () => this.delete());
         this.recordingSelector.addEventListener('click', (event) => this.selectRecording(event.target.value));
+        
+        const canvas = this.querySelector('#waveform-canvas');
+        if (canvas) {
+            // Wait for waveform.js to load if it hasn't already (simple check)
+            if (typeof WaveformDisplay !== 'undefined') {
+                this.waveform = new WaveformDisplay(canvas);
+            } else {
+                console.error("WaveformDisplay not defined. Make sure waveform.js is loaded.");
+            }
+        }
+
         this.renderRecordingSelector();
     }
         
@@ -39,6 +51,7 @@ class Recorder extends HTMLElement {
         </div>
         <div id="player">
             <h3>Player</h3>
+            <canvas id="waveform-canvas" style="width: 100%; height: 100px; background: #000; display: block; margin-bottom: 10px;"></canvas>
             <select id="recordingSelector">
                 <option value="">Select a recording</option>
             </select>
@@ -125,6 +138,11 @@ class Recorder extends HTMLElement {
         this.analyzer = audioContext.createAnalyser();
         this.analyzer.fftSize = 256;
         source.connect(this.analyzer);
+        
+        if (this.waveform) {
+             this.waveform.connect(this.analyzer);
+        }
+
         this.recordingStartTime = Date.now();
         this.mediaRecorder.ondataavailable = event => {
             this.audioChunks.push(event.data);
@@ -153,11 +171,22 @@ class Recorder extends HTMLElement {
         if (this.mediaRecorder) {
             this.mediaRecorder.stop();
         }
+        if (this.waveform && this.waveform.isLive) {
+            this.waveform.stopLoop();
+        }
         this.audioChunks = [];
         this.audio = null;
     }   
 
     play() {
+        const renderLoop = () => {
+            if (!this.audio.paused) {
+                 const duration = this.audioDuration || this.audio.duration;
+                 this.playerInfo.textContent = `Time: ${this.audio.currentTime.toFixed(2)}s / ${duration.toFixed(2)}s`;
+                 this.animationFrameId = requestAnimationFrame(renderLoop);
+            }
+        };
+
         const updatePlayButton = event => {
             if (event || !this.audio.paused) {
                 this.audio.pause();
@@ -166,9 +195,7 @@ class Recorder extends HTMLElement {
             } else {
                 this.audio.play();
                 this.playButton.textContent = "⏸️";
-                this.animationFrameId = requestAnimationFrame(() => {
-                    this.renderPlayerInfo()
-                });
+                renderLoop();
             }
         }
         this.audio.onended = updatePlayButton;
@@ -202,7 +229,21 @@ class Recorder extends HTMLElement {
         this.audioUrl && URL.revokeObjectURL(this.audioUrl);
         this.audioUrl = URL.createObjectURL(recording.blob);
         this.audio = new Audio(this.audioUrl);
-        this.renderPlayerInfo();
+        
+        if (this.waveform) {
+            const context = new AudioContext(); // Decoding requires context
+            const arrayBuffer = await recording.blob.arrayBuffer();
+            const audioBuffer = await context.decodeAudioData(arrayBuffer);
+            this.waveform.load(audioBuffer);
+            this.waveform.bindAudio(this.audio);
+            
+            // Fix Infinity duration by using decoded buffer duration
+            this.audioDuration = audioBuffer.duration;
+            this.playerInfo.textContent = `Time: 0.00s / ${this.audioDuration.toFixed(2)}s`;
+        }
+
+        console.log('Selected recording:', recording);
+        console.log(this.audio)
     }
 
 
