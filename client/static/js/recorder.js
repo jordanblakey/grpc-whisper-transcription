@@ -10,7 +10,6 @@ class Recorder extends HTMLElement {
         this.recordingStartTime = null;
         this.database = new RecorderDatabase();
         this.waveform = null;
-        console.log(this);
     }
 
     connectedCallback() {
@@ -51,7 +50,6 @@ class Recorder extends HTMLElement {
 
         // Hotkeys
         document.addEventListener('keydown', (e) => {
-             // Ignore if typing in an input
              if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
              if (e.code === 'Space') {
@@ -70,7 +68,7 @@ class Recorder extends HTMLElement {
                  e.preventDefault();
                  if (this.audio) {
                      const duration = (Number.isFinite(this.audioDuration) ? this.audioDuration : this.audio.duration) || Infinity;
-                     const step = (Number.isFinite(duration) ? duration : 10) * 0.10; // Fallback for infinite duration, though unlikely here
+                     const step = (Number.isFinite(duration) ? duration : 10) * 0.10;
                      this.audio.currentTime = Math.min(duration, this.audio.currentTime + step);
                  }
              } else if ((e.key === 'r' || e.code === 'KeyR') && !e.ctrlKey && !e.metaKey) {
@@ -152,12 +150,6 @@ class Recorder extends HTMLElement {
             }
             
             if (targetId) {
-                // Determine if we need to preserve details:
-                // If activeId was passed (explicit selection), use the passed preserveDetails (e.g. from onstop)
-                // If implicit selection (fallback), use false? Or pass through?
-                // Logic: onstop calls with (id, true). We want true.
-                // connectedCallback calls with (). We want false.
-                // So passing through is correct.
                 await this.selectRecording(targetId, preserveDetails);
             } else {
                 await this.selectRecording('', preserveDetails);
@@ -165,9 +157,15 @@ class Recorder extends HTMLElement {
         });
     }
 
-    renderrecorderInfo() {
+    renderRecorderInfo() {
         const duration = ((Date.now() - this.recordingStartTime) / 1000).toFixed(2);
         this.statusDisplay.textContent = `Recording (Time: ${duration}s)`;
+    }
+
+    formatTime(seconds) {
+        const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');
+        const secs = String((seconds % 60).toFixed(2)).padStart(5, '0');
+        return `${minutes}:${secs}`;
     }
 
     async renderPlayerInfo() {
@@ -178,14 +176,8 @@ class Recorder extends HTMLElement {
              duration = this.audio.duration;
         }
 
-        const formatSeconds = seconds => {
-            const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');
-            seconds = String((seconds % 60).toFixed(2)).padStart(5, '0');
-            return `${minutes}:${seconds}`;
-        };
-
-        const current = formatSeconds(this.audio.currentTime);
-        const total = formatSeconds(duration);
+        const current = this.formatTime(this.audio.currentTime);
+        const total = this.formatTime(duration);
         const state = this.audio.paused ? "Paused" : "Playing";
 
         this.statusDisplay.textContent = `${state} (Time: ${current} / ${total})`;
@@ -222,7 +214,13 @@ class Recorder extends HTMLElement {
         }
         
         this.cleanUpRecorder();
-        this.stream = await navigator.mediaDevices.getUserMedia({audio: true});
+        this.stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: true
+            }
+        });
         this.mediaRecorder = new MediaRecorder(this.stream);
         this.mediaRecorder.start(1000 / 60);
         const audioContext = new AudioContext();
@@ -243,8 +241,7 @@ class Recorder extends HTMLElement {
         this.recordingStartTime = Date.now();
         this.mediaRecorder.ondataavailable = event => {
             this.audioChunks.push(event.data);
-            this.renderrecorderInfo();
-            // Update details if visible
+            this.renderRecorderInfo();
             if (this.recordingDetails) {
                  this.recordingDetails.update(this.stream, this.mediaRecorder, this.analyzer, this.recordingStartTime);
             }
@@ -254,14 +251,10 @@ class Recorder extends HTMLElement {
     stopRecording() {
         this.mediaRecorder.onstop = async () => {
             const mimeType = this.mediaRecorder.mimeType || 'audio/webm';
-            console.log(`Recorder stopped. MIME type: ${mimeType}, total chunks: ${this.audioChunks.length}`);
             const audioBlob = new Blob(this.audioChunks, { type: mimeType });
             const timestamp = Date.now();
             await this.database.addRecording(audioBlob, timestamp);
             await this.renderRecordingSelector(timestamp, true);
-            // this.selectRecording(timestamp, true); // No longer needed as renderRecordingSelector handles it with preserveDetails=true
-            
-            // this.recorderInfo.replaceChildren(); // Removed old info clearing
             this.stream.getTracks().forEach(track => track.stop());
         }
         this.mediaRecorder.stop();
@@ -283,12 +276,6 @@ class Recorder extends HTMLElement {
     }   
 
     play() {
-        const renderLoop = () => {
-            if (!this.audio.paused) {
-                 this.renderPlayerInfo();
-            }
-        };
-
         const updatePlayButton = event => {
             if (event || !this.audio.paused) {
                 this.audio.pause();
@@ -297,7 +284,7 @@ class Recorder extends HTMLElement {
             } else {
                 this.audio.play();
                 this.playButton.textContent = "⏸️";
-                renderLoop();
+                this.renderPlayerInfo();
             }
         }
         this.audio.onended = updatePlayButton;
@@ -373,8 +360,6 @@ class Recorder extends HTMLElement {
             });
         }
 
-        console.log('Selected recording:', recording);
-        console.log(this.audio)
     }
 
 
@@ -382,10 +367,3 @@ class Recorder extends HTMLElement {
 
 customElements.define('audio-recorder', Recorder);
 document.body.appendChild(new Recorder());
-
-class Recording {
-    constructor(id, name) {
-        this.id = id;
-        this.name = name;
-    }
-}

@@ -167,7 +167,7 @@ class WaveformDisplay {
                 const amp = this.peaks[i];
                 const barHeight = Math.max(1, amp * this.height);
                 const y = (this.height - barHeight) / 2;
-                this.ctx.fillRect(x, y, Math.max(1, barWidth - 0.5), barHeight); 
+                this.ctx.fillRect(x, y, 1, barHeight); 
             }
         } else {
             // Downsample mode
