@@ -220,6 +220,7 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
                                 
                                 if is_stop:
                                     sentence_text = " ".join(current_sentence_words)
+                                    # Yield with absolute timestamp
                                     yield transcription_pb2.TranscriptionResult(
                                         text=sentence_text,
                                         is_final=True,
@@ -228,11 +229,15 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
                                     logging.info(f"FINAL (Word): [{absolute_start_time + window_offset + w.start:06.2f}s] {sentence_text}")
                                     
                                     total_words_finalized += len(current_sentence_words)
-                                    total_speech_seconds += (w.end - (w.start if len(current_sentence_words) == 1 else s.words[0].start))
+                                    # Use the actual duration of the finalized text for WPM
+                                    duration_finalized = (w.end - (w.start if len(current_sentence_words) == 1 else s.words[0].start))
+                                    total_speech_seconds += max(0.1, duration_finalized)
+                                    
                                     transcription_history.append(sentence_text)
                                     transcription_history = transcription_history[-5:]
                                     
-                                    last_finalized_end_rel = w.end
+                                    # Use a 50ms cushion to prevent clipping the start of the next word
+                                    last_finalized_end_rel = min(total_duration - window_offset, w.end + 0.05)
                                     current_sentence_words = []
 
                         # Remaining text for partial update or forced finalization
@@ -257,18 +262,26 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
                                                (total_stall >= stall_threshold and total_silence >= 0.4)
                         
                         if (global_trigger or should_force_fallback) and remaining_text:
-                            # Finalize the entire remainder as one block
-                            yield transcription_pb2.TranscriptionResult(
-                                text=remaining_text, is_final=True, start_time=absolute_start_time
-                            )
-                            logging.info(f"FINAL (Forced): [{absolute_start_time:06.2f}s] {remaining_text}")
-                            
-                            # Complete reset
-                            utterance_buffer = []
-                            samples_in_utterance = 0
-                            absolute_start_time += total_duration
-                            last_speech_text = ""
-                            last_text_change_time = total_duration
+                            # Anti-Hallucination Sink: Don't finalize very short, low-confidence fragments in forced modes
+                            words = remaining_text.split()
+                            if len(words) == 1 and len(words[0]) < 4 and not any(words[0].endswith(p) for p in STRONG_STOP):
+                                # It's probably a hallucination or a stutter, carry it over
+                                pass
+                            else:
+                                # Finalize the entire remainder as one block
+                                yield transcription_pb2.TranscriptionResult(
+                                    text=remaining_text, is_final=True, start_time=absolute_start_time + window_offset
+                                )
+                                logging.info(f"FINAL (Forced): [{absolute_start_time + window_offset:06.2f}s] {remaining_text}")
+                                
+                                # Complete reset
+                                utterance_buffer = []
+                                samples_in_utterance = 0
+                                absolute_start_time += total_duration
+                                last_speech_text = ""
+                                last_text_change_time = total_duration
+                                # Mark as fully processed
+                                remaining_text = "" 
                         elif last_finalized_end_rel > 0:
                             # Tail preservation based on last punctuation split
                             actual_split_time = window_offset + last_finalized_end_rel
@@ -292,7 +305,7 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
                             elif remaining_text:
                                 # Regular partial update
                                 yield transcription_pb2.TranscriptionResult(
-                                    text=remaining_text, is_final=False, start_time=absolute_start_time
+                                    text=remaining_text, is_final=False, start_time=absolute_start_time + window_offset
                                 )
                                 logging.info(f"DEBUG: dur={total_duration:.1f}s, silence={total_silence:.1f}s, words={num_words_window}")
                                 
