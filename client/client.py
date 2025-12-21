@@ -63,12 +63,21 @@ async def websocket_endpoint(websocket: WebSocket):
                     "is_final": response.is_final,
                     "start_time": response.start_time
                 })
+        except (WebSocketDisconnect, RuntimeError):
+            # Connection already closed or being closed
+            pass
         except grpc.RpcError as e:
             logging.error(f"gRPC error: {e}")
         except Exception as e:
             logging.error(f"Bridge error: {e}")
         finally:
-            await websocket.close()
+            try:
+                # Only close if it's still open (though Starlette usually handles this)
+                # This is a bit redundant but helps with the 'after sending websocket.close' error
+                if websocket.client_state.name == "CONNECTED":
+                    await websocket.close()
+            except:
+                pass
 
 
 if __name__ == "__main__":

@@ -61,6 +61,13 @@ let logMin = Math.log10(minFreq);
 let logMax = Math.log10(maxFreq);
 let logRange = logMax - logMin;
 
+function updateFreqBounds(sampleRate) {
+    maxFreq = 20000; // Keep fixed visual range to avoid "stretching" UI look
+    logMax = Math.log10(maxFreq);
+    logRange = logMax - logMin;
+    console.log(`Visual range fixed: 20Hz - ${maxFreq}Hz (Sample rate: ${sampleRate}Hz)`);
+}
+
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
@@ -183,7 +190,9 @@ function drawFrequencyLabels(ctx, canvas, logMin, logMax, logRange, sampleRate) 
     ctx.fillText('20Hz', 4, h - 4);
     ctx.textAlign = 'center';
     const x1k = (Math.log10(1000) - logMin) / logRange * w;
-    ctx.fillText('1kHz', x1k, h - 4);
+    if (x1k > 0 && x1k < w) {
+        ctx.fillText('1kHz', x1k, h - 4);
+    }
     ctx.textAlign = 'right';
     ctx.fillText('20kHz', w - 4, h - 4);
 }
@@ -277,14 +286,17 @@ async function startStream() {
             } 
         });
         
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        console.log(`AudioContext initialized at ${audioContext.sampleRate}Hz`);
 
         analyser = audioContext.createAnalyser();
         microphone = audioContext.createMediaStreamSource(stream);
         
         microphone.connect(analyser);
-        analyser.fftSize = 16384; 
-        analyser.smoothingTimeConstant = 0;
+        analyser.fftSize = 4096; // Better resolution for low end at 16kHz
+        analyser.smoothingTimeConstant = 0.6; // Slightly more smoothing for visual stability
+        
+        updateFreqBounds(audioContext.sampleRate);
 
         // Initialize WebSocket
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -417,13 +429,16 @@ async function startVisualizerOnly() {
         
         console.log('Microphone access granted');
         
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        console.log(`AudioContext (Visualizer-only) initialized at ${audioContext.sampleRate}Hz`);
         analyser = audioContext.createAnalyser();
         microphone = audioContext.createMediaStreamSource(stream);
         
         microphone.connect(analyser);
-        analyser.fftSize = 16384; 
-        analyser.smoothingTimeConstant = 0;
+        analyser.fftSize = 4096; 
+        analyser.smoothingTimeConstant = 0.6;
+
+        updateFreqBounds(audioContext.sampleRate);
 
         // No WebSocket connection - just visualizer
         const bufferLength = analyser.frequencyBinCount;
