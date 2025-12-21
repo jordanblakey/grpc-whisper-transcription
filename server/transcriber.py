@@ -47,7 +47,7 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
         target_sample_rate = 16000
         
         # Volume threshold for gating (RMS).
-        AMPLITUDE_THRESHOLD = 0.010 # Reset to a more moderate value
+        AMPLITUDE_THRESHOLD = 0.005 # Back to a middle ground to filter out noise floor
         consecutive_quiet_intervals = 0
 
         try:
@@ -91,16 +91,31 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
 
                     try:
                         # Contextual Prompting: Pass recent history to maintain quality
-                        # Limit prompt to last ~300 chars to avoid overwhelming the model
                         history_prompt = " ".join(transcription_history)[-300:].strip()
                         initial_prompt = f"I am transcribing live speech. Context: {history_prompt}" if history_prompt else "I am transcribing live speech."
 
-                        # Transcribe with tuned VAD to handle background music better
-                        segments, info = self.model.transcribe(
+                        # --- GPU Optimization: Sliding Window ---
+                        # Instead of transcribing the FULL buffer (which grows O(N^2)), 
+                        # we only transcribe the last 12s for performance.
+                        full_audio_v = np.concatenate(utterance_buffer)
+                        total_duration = len(full_audio_v) / samples_per_second
+                        
+                        window_duration = 12.0
+                        if total_duration > window_duration:
+                            window_samples = int(window_duration * samples_per_second)
+                            v_audio = full_audio_v[-window_samples:]
+                            window_offset = total_duration - window_duration
+                        else:
+                            v_audio = full_audio_v
+                            window_offset = 0.0
+
+                        # Transcribe with tuned VAD and Word Timestamps
+                        segments, _ = self.model.transcribe(
                             v_audio, 
                             beam_size=1,
                             vad_filter=True,
                             vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=200),
+                            word_timestamps=True,
                             no_speech_threshold=0.6,
                             log_prob_threshold=-0.5,
                             compression_ratio_threshold=2.4,
@@ -109,128 +124,177 @@ class WhisperTranscriber(transcription_pb2_grpc.WhisperTranscriberServicer):
                         )
                         
                         segments_list = list(segments)
-                        # Stricter check for speech presence (0.4 prob)
-                        speech_text = " ".join([s.text.strip() for s in segments_list if s.no_speech_prob < 0.4]).strip()
                         
-                        # Detect silence at the end of the window
-                        latest_speech_end = 0.0
-                        for s in segments_list:
-                             if s.no_speech_prob < 0.4:
-                                 latest_speech_end = max(latest_speech_end, s.end)
+                        # Calculate rough WPM from the window for heuristics
+                        window_text = " ".join([s.text.strip() for s in segments_list if s.no_speech_prob < 0.4]).strip()
+                        num_words_window = len(window_text.split())
+                        has_strong_punctuation = any(window_text.endswith(p) for p in [".", "?", "!"])
                         
-                        current_duration = samples_in_utterance / samples_per_second
-                        silence_duration = current_duration - latest_speech_end
-                        
-                        # Stall detection: Did the transcription actually grow?
-                        if speech_text != last_speech_text:
-                            last_speech_text = speech_text
-                            last_text_change_time = current_duration
-                        
-                        stall_duration = current_duration - last_text_change_time
-                        
-                        # --- Dynamic Threshold Calculation (WPM-Adaptive) ---
-                        words = speech_text.split()
-                        num_words = len(words)
-                        has_strong_punctuation = any(speech_text.endswith(p) for p in [".", "?", "!"])
-                        
-                        # Calculate Session WPM (with a sane default for the start)
                         avg_wpm = (total_words_finalized / (total_speech_seconds / 60)) if total_speech_seconds > 5 else 150
                         
-                        # Base required silence maps to WPM
-                        if avg_wpm > 180: # Fast (YouTube)
+                        # Dynamic Thresholds
+                        if avg_wpm > 180: # Fast
                             base_required_silence = 0.6
                             stall_threshold = 1.0 if has_strong_punctuation else 1.4
-                        elif avg_wpm < 130: # Slow (Narration)
+                        elif avg_wpm < 130: # Slow
                             base_required_silence = 1.2
                             stall_threshold = 1.5 if has_strong_punctuation else 2.0
                         else: # Normal
                             base_required_silence = 0.9
                             stall_threshold = 1.2 if has_strong_punctuation else 1.8
 
-                        # Aggressive punctuation override
                         required_silence = base_required_silence
                         if has_strong_punctuation:
                             required_silence = min(required_silence, 0.4 if avg_wpm < 130 else 0.3)
                         
-                        # Length-based urgency
-                        if num_words > 15 or current_duration > 15.0:
+                        if num_words_window > 15 or total_duration > 15.0:
                             required_silence = min(required_silence, 0.6)
 
-                        logging.info(f"DEBUG: WPM={avg_wpm:.0f}, silence={silence_duration:.2f}s, stall={stall_duration:.1f}s, words={num_words}, req_silence={required_silence:.1f}s")
+                        # --- Word-Level Incremental Finalization ---
+                        last_finalized_end_rel = 0.0
+                        
+                        current_sentence_words = []
+                        all_speech_text_parts = []
+                        
+                        # We only split mid-loop on strong punctuation. 
+                        # Ellipsis (...) is included as it signifies a natural break.
+                        STRONG_STOP = [".", "?", "!", "..."]
+                        
+                        for s_idx, s in enumerate(segments_list):
+                            # Filter out low-confidence segments (hallucinations)
+                            if s.no_speech_prob > 0.8 or s.avg_logprob < -1.0: 
+                                continue
+                            
+                            if not s.words:
+                                s_text = s.text.strip()
+                                if not s_text: continue
+                                is_stop = any(s_text.endswith(p) for p in STRONG_STOP)
+                                if is_stop:
+                                    yield transcription_pb2.TranscriptionResult(
+                                        text=s_text, 
+                                        is_final=True, 
+                                        start_time=absolute_start_time + window_offset + s.start
+                                    )
+                                    logging.info(f"FINAL (Segment): {s_text}")
+                                    last_finalized_end_rel = s.end
+                                    total_words_finalized += len(s_text.split())
+                                    total_speech_seconds += (s.end - s.start)
+                                    transcription_history.append(s_text)
+                                    transcription_history = transcription_history[-5:]
+                                else:
+                                    all_speech_text_parts.append(s_text)
+                                continue
 
-                        # Finalization triggers
-                        # 1. Proactive Sentence Splitting (YouTube Style): Break at period if buffer > 12s
-                        # 2. Dynamic silence threshold reached
-                        # 3. Text stall (1.2s-2.0s based on WPM)
-                        # 4. Consecutive quiet RMS checks (2.0s)
-                        # 5. Hard safety cap (20s)
-                        
-                        should_finalize = (current_duration > 12.0 and has_strong_punctuation) or \
-                                         (silence_duration >= required_silence) or \
-                                         (stall_duration >= stall_threshold and silence_duration >= 0.4) or \
-                                         (consecutive_quiet_intervals >= 2) or \
-                                         (samples_in_utterance >= max_utterance_samples)
-                        
-                        # --- Fallback Strategy for "Silent" Long Buffers ---
-                        if not speech_text and samples_in_utterance > 15 * samples_per_second:
-                            logging.info("FALLBACK: Buffer long but empty. Retrying without VAD.")
-                            f_segments, _ = self.model.transcribe(
-                                v_audio,
-                                beam_size=2,
-                                vad_filter=False, # Disable VAD to recover missed speech
-                                initial_prompt=initial_prompt
-                            )
-                            f_segments_list = list(f_segments)
-                            speech_text = " ".join([s.text.strip() for s in f_segments_list if s.no_speech_prob < 0.6]).strip()
-                        
-                        if should_finalize:
-                            if speech_text:
-                                result = transcription_pb2.TranscriptionResult(
-                                    text=speech_text,
-                                    is_final=True,
-                                    start_time=absolute_start_time
-                                )
-                                logging.info(f"FINAL: [{absolute_start_time:06.2f}s] (WPM:{avg_wpm:.0f}) {speech_text}")
-                                yield result
+                            for w_idx, w in enumerate(s.words):
+                                w_text = w.word.strip()
+                                if not w_text: continue
+                                current_sentence_words.append(w_text)
                                 
-                                # Update WPM stats and history
-                                total_words_finalized += num_words
-                                total_speech_seconds += current_duration
-                                transcription_history.append(speech_text)
-                                transcription_history = transcription_history[-5:]
+                                # --- Contextual Split Protection ---
+                                has_punct = any(w_text.endswith(p) for p in STRONG_STOP)
+                                is_stop = False
+                                
+                                if has_punct:
+                                    # Look Ahead: Is there another word IMMEDIATELY following this one?
+                                    has_next_word_soon = False
+                                    if w_idx < len(s.words) - 1:
+                                        next_w = s.words[w_idx + 1]
+                                        # If next word starts within 400ms, it's likely a continuous thought
+                                        if (next_w.start - w.end) < 0.4:
+                                            has_next_word_soon = True
+                                    
+                                    # Edge Protection: Is this the very last word of the entire result?
+                                    is_absolute_last = (w_idx == len(s.words) - 1) and (s_idx == len(segments_list) - 1)
+                                    silence_at_edge = total_duration - (window_offset + w.end)
+                                    
+                                    if has_next_word_soon:
+                                        # Someone is talking fast; don't split mid-phrase
+                                        is_stop = False
+                                    elif is_absolute_last:
+                                        # At the edge, require 0.7s of silence to confirm the thought is over
+                                        # This prevents "rounding" fragments that lead to hallucinations
+                                        is_stop = (silence_at_edge >= 0.7)
+                                    else:
+                                        # Mid-buffer split with a clear gap; safe to break.
+                                        is_stop = True
+                                
+                                if is_stop:
+                                    sentence_text = " ".join(current_sentence_words)
+                                    yield transcription_pb2.TranscriptionResult(
+                                        text=sentence_text,
+                                        is_final=True,
+                                        start_time=absolute_start_time + window_offset + w.start
+                                    )
+                                    logging.info(f"FINAL (Word): [{absolute_start_time + window_offset + w.start:06.2f}s] {sentence_text}")
+                                    
+                                    total_words_finalized += len(current_sentence_words)
+                                    total_speech_seconds += (w.end - (w.start if len(current_sentence_words) == 1 else s.words[0].start))
+                                    transcription_history.append(sentence_text)
+                                    transcription_history = transcription_history[-5:]
+                                    
+                                    last_finalized_end_rel = w.end
+                                    current_sentence_words = []
 
-                                # SAFE RESET
-                                absolute_start_time += current_duration
-                                utterance_buffer = []
-                                samples_in_utterance = 0
-                                last_speech_text = ""
-                                last_text_change_time = 0.0
-                            elif samples_in_utterance >= max_utterance_samples + (10 * samples_per_second):
-                                # EMERGENCY RESET: Extreme runaway buffer with NO text detected
-                                logging.info(f"EMERGENCY: Safety Reset triggered ({current_duration:.1f}s). No text detected in long buffer.")
-                                absolute_start_time += current_duration
-                                utterance_buffer = []
-                                samples_in_utterance = 0
-                                last_speech_text = ""
-                                last_text_change_time = 0.0
-                            elif consecutive_quiet_intervals >= 10:
-                                # SILENCE RESET: 10s of absolute electrical silence
-                                logging.info(f"DEBUG: Reset after 10s of absolute silence.")
-                                absolute_start_time += current_duration
-                                utterance_buffer = []
-                                samples_in_utterance = 0
-                                last_speech_text = ""
-                                last_text_change_time = 0.0
-                            else:
-                                logging.info(f"DEBUG: Finalization trigger met but speech_text empty. Carrying over buffer ({current_duration:.1f}s)")
+                        # Remaining text for partial update or forced finalization
+                        remaining_text = " ".join(current_sentence_words + all_speech_text_parts).strip()
+                        
+                        # --- Force Finalization Check (Outside Loop) ---
+                        latest_speech_timestamp_rel = 0.0
+                        for s in segments_list:
+                            if s.no_speech_prob < 0.4:
+                                latest_speech_timestamp_rel = max(latest_speech_timestamp_rel, s.end)
+                        
+                        total_silence = total_duration - (window_offset + latest_speech_timestamp_rel)
+                        
+                        if remaining_text != last_speech_text:
+                            last_speech_text = remaining_text
+                            last_text_change_time = total_duration
+                        total_stall = total_duration - last_text_change_time
+
+                        # Fallback triggers (silence, stall, safety cap)
+                        global_trigger = (samples_in_utterance >= max_utterance_samples) or (consecutive_quiet_intervals >= 2)
+                        should_force_fallback = (total_silence >= required_silence) or \
+                                               (total_stall >= stall_threshold and total_silence >= 0.4)
+                        
+                        if (global_trigger or should_force_fallback) and remaining_text:
+                            # Finalize the entire remainder as one block
+                            yield transcription_pb2.TranscriptionResult(
+                                text=remaining_text, is_final=True, start_time=absolute_start_time
+                            )
+                            logging.info(f"FINAL (Forced): [{absolute_start_time:06.2f}s] {remaining_text}")
+                            
+                            # Complete reset
+                            utterance_buffer = []
+                            samples_in_utterance = 0
+                            absolute_start_time += total_duration
+                            last_speech_text = ""
+                            last_text_change_time = total_duration
+                        elif last_finalized_end_rel > 0:
+                            # Tail preservation based on last punctuation split
+                            actual_split_time = window_offset + last_finalized_end_rel
+                            split_sample = int(actual_split_time * samples_per_second)
+                            
+                            tail_audio = full_audio_v[split_sample:]
+                            absolute_start_time += actual_split_time
+                            utterance_buffer = [tail_audio] if len(tail_audio) > 0 else []
+                            samples_in_utterance = len(tail_audio)
+                            
+                            last_speech_text = ""
+                            last_text_change_time = 0.0
                         else:
-                            # Yield live partial update (only if we have text)
-                            if speech_text:
+                            # Emergency Cleanup for silent/stuck buffers
+                            if global_trigger or consecutive_quiet_intervals >= 10:
+                                logging.info(f"EMERGENCY Cleanup ({total_duration:.1f}s)")
+                                utterance_buffer = []
+                                samples_in_utterance = 0
+                                absolute_start_time += total_duration
+                                last_speech_text = ""
+                            elif remaining_text:
+                                # Regular partial update
                                 yield transcription_pb2.TranscriptionResult(
-                                    text=speech_text,
-                                    is_final=False,
-                                    start_time=absolute_start_time
+                                    text=remaining_text, is_final=False, start_time=absolute_start_time
                                 )
+                                logging.info(f"DEBUG: dur={total_duration:.1f}s, silence={total_silence:.1f}s, words={num_words_window}")
                                 
                     except Exception as e:
                         logging.error(f"Transcription error: {e}")
