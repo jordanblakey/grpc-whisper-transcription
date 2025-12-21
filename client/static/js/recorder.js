@@ -16,6 +16,7 @@ class Recorder extends HTMLElement {
     connectedCallback() {
         this.render();
         this.recordButton = this.querySelector('#record');
+        this.infoButton = this.querySelector('#info');
         this.clearAllButton = this.querySelector('#clear-all');
         this.playButton = this.querySelector('#play');
         this.saveButton = this.querySelector('#save');
@@ -24,11 +25,17 @@ class Recorder extends HTMLElement {
         this.statusDisplay = this.querySelector('#status');
         
         this.recordButton.addEventListener('click', () => this.record());
+        this.infoButton.addEventListener('click', () => {
+             if (!this.recordingDetails) {
+                 this.recordingDetails = new RecordingDetails(this);
+             }
+             this.recordingDetails.toggle();
+        });
         this.clearAllButton.addEventListener('click', () => this.clearAll());
         this.playButton.addEventListener('click', () => this.play());
         this.saveButton.addEventListener('click', () => this.save());
         this.deleteButton.addEventListener('click', () => this.delete());
-        this.recordingSelector.addEventListener('click', (event) => this.selectRecording(event.target.value));
+        this.recordingSelector.addEventListener('change', (event) => this.selectRecording(event.target.value));
         
         const canvas = this.querySelector('#waveform-canvas');
         if (canvas) {
@@ -84,6 +91,12 @@ class Recorder extends HTMLElement {
                      e.preventDefault();
                      this.save();
                  } 
+             } else if (e.key === 'i' || e.code === 'KeyI') {
+                 // i for info
+                 if (!this.recordingDetails) {
+                     this.recordingDetails = new RecordingDetails(this);
+                 }
+                 this.recordingDetails.toggle();
              } else if (e.code === 'ArrowUp') {
                  e.preventDefault();
                  if (this.recordingSelector.selectedIndex > 0) {
@@ -104,8 +117,9 @@ class Recorder extends HTMLElement {
         this.innerHTML = `
         <div id="controls">
             <button id="record" title="Record (r)">🔴</button>
+            <button id="info" title="Show Recording Details (i)">ℹ️</button>
             <select id="recordingSelector" title="Select Recording (Up/Down Arrows)">
-            <option value="">Select a recording</option>
+                <option value="">Select a recording</option>
             </select>
             <button id="play" title="Play/Pause (Space)">▶️</button>
             <button id="save" title="Save Recording (s)">💾</button>
@@ -120,8 +134,8 @@ class Recorder extends HTMLElement {
         `;
     }
 
-    renderRecordingSelector() {
-        return this.database.getRecordings().then(recordings => {
+    renderRecordingSelector(activeId = null, preserveDetails = false) {
+        return this.database.getRecordings().then(async recordings => {
             this.recordings = recordings.sort((a, b) => b.id - a.id);
             this.recordingSelector.replaceChildren();
             this.recordingSelector.appendChild(new Option('Select a recording', ''));
@@ -129,12 +143,24 @@ class Recorder extends HTMLElement {
                 const option = new Option(new Date(recording.id).toLocaleString(), recording.id);        
                 this.recordingSelector.appendChild(option);
             });
-            if (!this.recordingSelector.value) {
+            
+            let targetId = activeId;
+            if (!targetId && !this.recordingSelector.value) {
                 if (this.recordings.length > 0) {
-                     this.selectRecording(this.recordings[0].id);
-                } else {
-                     this.selectRecording('');
+                     targetId = this.recordings[0].id;
                 }
+            }
+            
+            if (targetId) {
+                // Determine if we need to preserve details:
+                // If activeId was passed (explicit selection), use the passed preserveDetails (e.g. from onstop)
+                // If implicit selection (fallback), use false? Or pass through?
+                // Logic: onstop calls with (id, true). We want true.
+                // connectedCallback calls with (). We want false.
+                // So passing through is correct.
+                await this.selectRecording(targetId, preserveDetails);
+            } else {
+                await this.selectRecording('', preserveDetails);
             }
         });
     }
@@ -145,7 +171,13 @@ class Recorder extends HTMLElement {
     }
 
     async renderPlayerInfo() {
-        await this.getDuration();
+        let duration = this.audioDuration;
+        
+        if (!Number.isFinite(duration)) {
+             await this.getDuration();
+             duration = this.audio.duration;
+        }
+
         const formatSeconds = seconds => {
             const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');
             seconds = String((seconds % 60).toFixed(2)).padStart(5, '0');
@@ -153,7 +185,7 @@ class Recorder extends HTMLElement {
         };
 
         const current = formatSeconds(this.audio.currentTime);
-        const total = formatSeconds(this.audio.duration);
+        const total = formatSeconds(duration);
         const state = this.audio.paused ? "Paused" : "Playing";
 
         this.statusDisplay.textContent = `${state} (Time: ${current} / ${total})`;
@@ -200,13 +232,22 @@ class Recorder extends HTMLElement {
         source.connect(this.analyzer);
         
         if (this.waveform) {
-             this.waveform.connect(this.analyzer);
+            this.waveform.connect(this.analyzer);
+        }
+        
+        // Initialize RecordingDetails
+        if (!this.recordingDetails) {
+            this.recordingDetails = new RecordingDetails(this);
         }
 
         this.recordingStartTime = Date.now();
         this.mediaRecorder.ondataavailable = event => {
             this.audioChunks.push(event.data);
             this.renderrecorderInfo();
+            // Update details if visible
+            if (this.recordingDetails) {
+                 this.recordingDetails.update(this.stream, this.mediaRecorder, this.analyzer, this.recordingStartTime);
+            }
         };
     }
 
@@ -217,9 +258,12 @@ class Recorder extends HTMLElement {
             const audioBlob = new Blob(this.audioChunks, { type: mimeType });
             const timestamp = Date.now();
             await this.database.addRecording(audioBlob, timestamp);
-            await this.renderRecordingSelector();
-            this.cleanUpRecorder();
-        };
+            await this.renderRecordingSelector(timestamp, true);
+            // this.selectRecording(timestamp, true); // No longer needed as renderRecordingSelector handles it with preserveDetails=true
+            
+            // this.recorderInfo.replaceChildren(); // Removed old info clearing
+            this.stream.getTracks().forEach(track => track.stop());
+        }
         this.mediaRecorder.stop();
 
     }
@@ -241,9 +285,7 @@ class Recorder extends HTMLElement {
     play() {
         const renderLoop = () => {
             if (!this.audio.paused) {
-                 const duration = this.audioDuration || this.audio.duration;
-                 this.playerInfo.textContent = `Time: ${this.audio.currentTime.toFixed(2)}s / ${duration.toFixed(2)}s`;
-                 this.animationFrameId = requestAnimationFrame(renderLoop);
+                 this.renderPlayerInfo();
             }
         };
 
@@ -284,12 +326,13 @@ class Recorder extends HTMLElement {
         this.renderRecordingSelector();
     }
 
-    async selectRecording(value) {
+    async selectRecording(value, preserveDetails = false) {
         if (!value) {
             this.audioUrl && URL.revokeObjectURL(this.audioUrl);
             this.audioUrl = null;
             this.audio = null;
             if (this.waveform) this.waveform.clear();
+            if (this.recordingDetails) this.recordingDetails.clear();
             this.statusDisplay.textContent = 'No recording selected.';
             this.recordingSelector.value = '';
             return;
@@ -299,6 +342,12 @@ class Recorder extends HTMLElement {
             this.audio.pause();
             this.playButton.textContent = "▶️";
         }
+        
+        // Clear details unless specifically asked to preserve (e.g. just finished recording)
+        if (!preserveDetails && this.recordingDetails) {
+            this.recordingDetails.clear();
+        }
+
         const recording = await this.database.getRecording(value);
         this.audioUrl && URL.revokeObjectURL(this.audioUrl);
         this.audioUrl = URL.createObjectURL(recording.blob);
@@ -314,7 +363,14 @@ class Recorder extends HTMLElement {
             // Fix Infinity duration by using decoded buffer duration
             this.audioDuration = audioBuffer.duration;
             // Initial state for newly selected recording
-            this.statusDisplay.textContent = `Paused (Time: 00:00.00 / ${this.audioDuration.toFixed(2)}s)`;
+            this.renderPlayerInfo();
+            
+            // Update time on seek/timeupdate
+            this.audio.addEventListener('timeupdate', () => {
+                if(this.audio.paused) {
+                    this.renderPlayerInfo();
+                }
+            });
         }
 
         console.log('Selected recording:', recording);
