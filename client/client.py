@@ -20,7 +20,7 @@ target = os.environ.get("SERVER_ADDRESS", "server:50051")
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("recorder.html", {"request": request})
 
 @app.websocket("/ws/audio")
 async def websocket_endpoint(websocket: WebSocket):
@@ -75,12 +75,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 pass
 
 @app.get("/recorder", response_class=HTMLResponse)
-async def read_root(request: Request):
+async def read_recorder(request: Request):
     return templates.TemplateResponse("recorder.html", {"request": request})
-
-@app.get("/recorder2", response_class=HTMLResponse)
-async def read_root(request: Request):
-    return templates.TemplateResponse("recorder2.html", {"request": request})
 
 if __name__ == "__main__":
     import uvicorn
