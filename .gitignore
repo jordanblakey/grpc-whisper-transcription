@@ -4,3 +4,4 @@ generated
 grpc/
 *_pb2*
 recordings
+experiments/speech_to_text/generated_audio/*

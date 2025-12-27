@@ -1,0 +1,13 @@
+# uv pip compile requirements.in -o requirements.txt
+
+# text to speech
+torchaudio
+coqui-tts
+kokoro-onnx
+pypinyin
+cutlet
+mecab
+unidic-lite
+soundfile
+kokoro
+pip
