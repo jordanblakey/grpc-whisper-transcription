@@ -36,7 +36,7 @@ buffer.append(Wave(hz=440, amp=1.0, duration=0.4).sawtooth())
 stream.write(np.concatenate(buffer).astype(np.float32).tobytes())
 
 # save audio to .wav file
-save_buffer_as_wave(buffer, "recordings/track_1.wav")
+save_buffer_as_wave(buffer, "recordings/track1.wav")
 
 time.sleep(.01) # prevent chirp
 stream.stop_stream()

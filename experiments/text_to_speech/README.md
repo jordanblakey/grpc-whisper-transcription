@@ -5,6 +5,16 @@ https://github.com/jiaaro/pydub
 https://github.com/spotify/pedalboard
 https://github.com/jiaaro/pydub
 
+
+
+```
+# for kokoro gpu support
+sudo dpkg -i nv-tensorrt-repo-ubuntuXX.XX-cudaX.X-tensorRTX.X.X.X_1-1_amd64.deb
+sudo apt-key add /var/nv-tensorrt-repo-ubuntuXX.XX-cudaX.X-tensorRTX.X.X.X/7fa2af80.pub # Check your file name!
+sudo apt-get update
+```
+
+
 tts --model_name "tts_models/multilingual/multi-dataset/xtts_v2" --list_speaker_idxs
 
 ```txt

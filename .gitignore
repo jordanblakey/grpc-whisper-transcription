@@ -4,4 +4,7 @@ generated
 grpc/
 *_pb2*
 recordings
-experiments/speech_to_text/generated_audio/*
+experiments/text_to_speech/generated_audio/
+
+kokoro-v*
+voices-v*.bin

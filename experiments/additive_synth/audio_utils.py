@@ -29,3 +29,4 @@ def save_buffer_as_wave(buffer, filename="recordings/output.wav"):
         f.setsampwidth(2)
         f.setframerate(48000)
         f.writeframes(samples.tobytes())
+
