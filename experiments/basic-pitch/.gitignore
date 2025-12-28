@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.env
+*.aup3-wal
+*.aup3-shm
