@@ -12,3 +12,4 @@ play:
 	python 06_chords.py
 	python 07_scales.py
 	python 08_effects.py
+	python 09_interesting_chords.py

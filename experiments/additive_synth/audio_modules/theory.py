@@ -9,12 +9,14 @@ def interval(hz, semitones):
 
 # chords
 
-def play_chord(chord_hz: list[int], amp: float = 1.0, duration: float = 1.0, wave_type: str = 'sine'):
+def play_chord(chord_hz: list[int], amp: float = 1.0, duration: float = 1.0, wave_type: str = 'sine', roll_on: float = 0.0):
     """Given a list of frequencies, play a chord."""
     with Audio() as a:
         waves = []
-        for hz in chord_hz:
+        for i, hz in enumerate(chord_hz):
             waves.append(Wave(hz=hz, amp=amp, duration=duration))
+            waves[i].delay = i * roll_on
+            waves[i].duration = duration - i * roll_on
         for i in range(len(waves)):
             if wave_type == 'sine':
                 waves[i] = waves[i].sine()
@@ -26,6 +28,7 @@ def play_chord(chord_hz: list[int], amp: float = 1.0, duration: float = 1.0, wav
                 waves[i] = waves[i].triangle()
         wave = utils.sum_waveforms(waves)
         wave = effects.fade(wave, fade_in_ms=250, fade_out_ms=500, ease_in="sine", ease_out="easeInQuad")
+
         a.buffer.append(wave)
         a.play_buffer()
 
@@ -48,6 +51,36 @@ def augmented_chord(hz):
 def power_chord(hz):
     """Given a base frequency, return the frequencies of the notes in a power chord."""
     return [hz, interval(hz, 7), interval(hz, 12)]
+
+def chord(hz, notes: list[str]):
+    intervals = {
+        'uni': interval(hz, 0),
+        'mi2': interval(hz, 1),
+        'ma2': interval(hz, 2),
+        'mi3': interval(hz, 3),
+        'ma3': interval(hz, 4),
+        'p4': interval(hz, 5),
+        'tri': interval(hz, 6),
+        'p5': interval(hz, 7),
+        'mi6': interval(hz, 8),
+        'ma6': interval(hz, 9),
+        'mi7': interval(hz, 10),
+        'ma7': interval(hz, 11),
+        'oct': interval(hz, 12),
+        'mi9': interval(hz, 13),
+        'ma9': interval(hz, 14),
+        'mi10': interval(hz, 15),
+        'ma10': interval(hz, 16),
+        'p11': interval(hz, 17),
+        'tri2': interval(hz, 18),
+        'p12': interval(hz, 19),
+        'mi13': interval(hz, 20),
+        'ma13': interval(hz, 21),
+        'mi14': interval(hz, 20),
+        'ma14': interval(hz, 21),
+        'oct2': interval(hz, 24),
+    }
+    return [intervals[n] for n in notes]
 
 
 # scales

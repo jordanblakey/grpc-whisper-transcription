@@ -22,6 +22,7 @@ class Wave:
     @duration.setter
     def duration(self, value):
         self.t = np.linspace(0, value, int(SAMPLE_RATE * value), endpoint=False)
+        self.phase = (self.t * self.hz) % 1.0
 
     def sine(self):
         samples = self.amp * np.sin(2 * np.pi * (self.t * self.hz))
